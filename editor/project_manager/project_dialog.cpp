@@ -1114,11 +1114,14 @@ void ProjectDialog::show_dialog(bool p_reset_name) {
 	_validate_path();
 
 	if (mode == MODE_CLONE) {
-		// The dialog may have previously shown the new-project controls.
-		// Recalculate its size after hiding them for the compact clone flow.
-		reset_size();
+		// Keep this focused dialog compact instead of inheriting the larger
+		// minimum size required by the other project creation controls.
+		set_wrap_controls(false);
+		popup_centered(Size2(500, 300) * EDSCALE);
+	} else {
+		set_wrap_controls(true);
+		popup_centered(Size2(500, 0) * EDSCALE);
 	}
-	popup_centered(Size2(500, 0) * EDSCALE);
 }
 
 void ProjectDialog::_notification(int p_what) {
