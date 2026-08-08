@@ -38,6 +38,7 @@ class CheckButton;
 class EditorFileDialog;
 class LineEdit;
 class OptionButton;
+class ProgressBar;
 class TextureRect;
 
 class ProjectDialog : public ConfirmationDialog {
@@ -84,6 +85,9 @@ private:
 	Label *project_path_label = nullptr;
 	Label *install_path_label = nullptr;
 	Label *clone_description = nullptr;
+	VBoxContainer *clone_progress_container = nullptr;
+	Label *clone_progress_label = nullptr;
+	ProgressBar *clone_progress = nullptr;
 
 	VBoxContainer *renderer_container = nullptr;
 	Label *renderer_info = nullptr;
@@ -119,6 +123,8 @@ private:
 	void _set_message(const String &p_msg, MessageType p_type, InputType input_type = PROJECT_PATH);
 	void _update_ok_button();
 	void _validate_path();
+	void _update_clone_progress(const String &p_output);
+	void _set_clone_in_progress(bool p_in_progress);
 	static String _get_github_repository_url(const String &p_url);
 	String _get_clone_target_path() const;
 

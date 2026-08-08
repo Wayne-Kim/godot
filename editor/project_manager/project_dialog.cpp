@@ -32,6 +32,7 @@
 
 #include "core/config/project_settings.h"
 #include "core/io/dir_access.h"
+#include "core/io/file_access.h"
 #include "core/io/zip_io.h"
 #include "core/object/callable_mp.h"
 #include "core/os/os.h"
@@ -43,11 +44,13 @@
 #include "editor/themes/editor_icons.h"
 #include "editor/themes/editor_scale.h"
 #include "editor/version_control/editor_vcs_interface.h"
+#include "main/main.h"
 #include "scene/gui/check_box.h"
 #include "scene/gui/check_button.h"
 #include "scene/gui/line_edit.h"
 #include "scene/gui/link_button.h"
 #include "scene/gui/option_button.h"
+#include "scene/gui/progress_bar.h"
 #include "scene/gui/separator.h"
 #include "scene/gui/texture_rect.h"
 #include "servers/display/display_server.h"
@@ -95,6 +98,19 @@ static bool is_zip_file(Ref<DirAccess> p_d, const String &p_path) {
 	return p_path.get_extension() == "zip" && p_d->file_exists(p_path);
 }
 
+static bool read_process_output(const Ref<FileAccess> &p_pipe, String &r_output) {
+	const uint64_t available = p_pipe->get_length() - p_pipe->get_position();
+	if (available == 0) {
+		return false;
+	}
+
+	PackedByteArray buffer;
+	buffer.resize(available);
+	p_pipe->get_buffer(buffer.ptrw(), available);
+	r_output += String::utf8((const char *)buffer.ptr(), available);
+	return true;
+}
+
 String ProjectDialog::_get_github_repository_url(const String &p_url) {
 	const String url = p_url.strip_edges().trim_suffix("/");
 	static const String github_url_prefix = "https://github.com/";
@@ -116,6 +132,62 @@ String ProjectDialog::_get_github_repository_url(const String &p_url) {
 String ProjectDialog::_get_clone_target_path() const {
 	const String repository_name = project_path->get_text().strip_edges().trim_suffix("/").get_file().get_basename();
 	return install_path->get_text().simplify_path().path_join(repository_name);
+}
+
+void ProjectDialog::_update_clone_progress(const String &p_output) {
+	const int percent_pos = p_output.rfind("%");
+	if (percent_pos == -1) {
+		return;
+	}
+
+	int percent_start = percent_pos;
+	while (percent_start > 0 && p_output[percent_start - 1] >= '0' && p_output[percent_start - 1] <= '9') {
+		percent_start--;
+	}
+	const String percent_text = p_output.substr(percent_start, percent_pos - percent_start);
+	if (!percent_text.is_valid_int()) {
+		return;
+	}
+
+	int stage_position = -1;
+	String stage = TTRC("Cloning repository");
+	const String receiving_objects = "Receiving objects:";
+	const String resolving_deltas = "Resolving deltas:";
+	const String checking_out_files = "Checking out files:";
+	if (p_output.rfind(receiving_objects) > stage_position) {
+		stage_position = p_output.rfind(receiving_objects);
+		stage = TTRC("Receiving objects");
+	}
+	if (p_output.rfind(resolving_deltas) > stage_position) {
+		stage_position = p_output.rfind(resolving_deltas);
+		stage = TTRC("Resolving deltas");
+	}
+	if (p_output.rfind(checking_out_files) > stage_position) {
+		stage = TTRC("Checking out files");
+	}
+
+	clone_progress->set_indeterminate(false);
+	clone_progress->set_value(CLAMP(percent_text.to_int(), 0, 100));
+	clone_progress_label->set_text(vformat(TTR("%s: %d%%"), stage, percent_text.to_int()));
+}
+
+void ProjectDialog::_set_clone_in_progress(bool p_in_progress) {
+	project_path->set_editable(!p_in_progress);
+	install_path->set_editable(!p_in_progress);
+	install_browse->set_disabled(p_in_progress);
+	get_ok_button()->set_disabled(p_in_progress);
+	get_cancel_button()->set_disabled(p_in_progress);
+	set_close_on_escape(!p_in_progress);
+
+	if (p_in_progress) {
+		clone_progress_container->show();
+		clone_progress_label->set_text(TTRC("Cloning repository..."));
+		clone_progress->set_indeterminate(true);
+		set_size(Size2(500, 350) * EDSCALE);
+	} else {
+		clone_progress_container->hide();
+		set_size(Size2(500, 300) * EDSCALE);
+	}
 }
 
 void ProjectDialog::_validate_path() {
@@ -696,15 +768,44 @@ void ProjectDialog::ok_pressed() {
 		List<String> git_args;
 		git_args.push_back("clone");
 		git_args.push_back("--recurse-submodules");
+		git_args.push_back("--progress");
 		git_args.push_back(_get_github_repository_url(project_path->get_text()));
 		git_args.push_back(path);
 
-		int exit_code = 0;
-		const Error err = OS::get_singleton()->execute("git", git_args, nullptr, &exit_code, true);
-		if (err != OK) {
+		Dictionary pipe_info = OS::get_singleton()->execute_with_pipe("git", git_args, false);
+		if (pipe_info.is_empty()) {
 			_set_message(TTRC("Couldn't start Git. Make sure Git is installed and available in PATH."), MESSAGE_ERROR, INSTALL_PATH);
 			return;
 		}
+
+		Ref<FileAccess> stdout_pipe = pipe_info["stdio"];
+		Ref<FileAccess> stderr_pipe = pipe_info["stderr"];
+		ProcessID process_id = pipe_info["pid"];
+		String clone_output;
+
+		_set_clone_in_progress(true);
+		while (true) {
+			const bool received_stdout = read_process_output(stdout_pipe, clone_output);
+			const bool received_stderr = read_process_output(stderr_pipe, clone_output);
+			const bool received_output = received_stdout || received_stderr;
+			if (received_output) {
+				_update_clone_progress(clone_output);
+			}
+
+			DisplayServer::get_singleton()->process_events();
+			Main::iteration();
+
+			if (!received_output && !OS::get_singleton()->is_process_running(process_id)) {
+				break;
+			}
+			OS::get_singleton()->delay_usec(10000);
+		}
+
+		stdout_pipe->close();
+		stderr_pipe->close();
+		_set_clone_in_progress(false);
+
+		const int exit_code = OS::get_singleton()->get_process_exit_code(process_id);
 		if (exit_code != 0) {
 			_set_message(vformat(TTR("Couldn't clone GitHub repository (error %d)."), exit_code), MESSAGE_ERROR, INSTALL_PATH);
 			return;
@@ -991,6 +1092,7 @@ void ProjectDialog::show_dialog(bool p_reset_name) {
 		project_browse->show();
 		install_status_rect->show();
 		clone_description->hide();
+		clone_progress_container->hide();
 		install_path_label->set_text(TTRC("Project Installation Path:"));
 		install_path->set_accessibility_name(TTRC("Project Installation Path:"));
 
@@ -1238,6 +1340,17 @@ ProjectDialog::ProjectDialog() {
 	install_browse->set_text(TTRC("Browse"));
 	install_browse->connect(SceneStringName(pressed), callable_mp(this, &ProjectDialog::_browse_install_path));
 	iphb->add_child(install_browse);
+
+	clone_progress_container = memnew(VBoxContainer);
+	vb->add_child(clone_progress_container);
+
+	clone_progress_label = memnew(Label);
+	clone_progress_container->add_child(clone_progress_label);
+
+	clone_progress = memnew(ProgressBar);
+	clone_progress->set_max(100);
+	clone_progress_container->add_child(clone_progress);
+	clone_progress_container->hide();
 
 	msg = memnew(Label);
 	msg->set_focus_mode(Control::FOCUS_ACCESSIBILITY);
