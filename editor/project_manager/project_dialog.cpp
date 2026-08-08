@@ -893,7 +893,7 @@ void ProjectDialog::ok_pressed() {
 			}
 		}
 #endif
-		emit_signal(SNAME("project_created"), path, mode == MODE_NEW || (mode != MODE_CLONE && edit_check_box->is_pressed()));
+		emit_signal(SNAME("project_created"), path, mode == MODE_NEW || mode == MODE_CLONE || edit_check_box->is_pressed());
 	} else if (mode == MODE_DUPLICATE) {
 		emit_signal(SNAME("project_duplicated"), original_project_path, path, edit_check_box->is_visible() && edit_check_box->is_pressed());
 	} else if (mode == MODE_RENAME) {
